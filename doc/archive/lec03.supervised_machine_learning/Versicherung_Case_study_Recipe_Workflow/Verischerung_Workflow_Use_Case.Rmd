@@ -1,0 +1,680 @@
+---
+title: "Versicherung_Use_case_final"
+author: "Dr. Houssam Jedidi"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Einführung
+
+In dieser Analyse untersuchen wir Versicherungsdaten und trainieren verschiedene Machine-Learning-Modelle, um die Versicherungsaufwendungen (**expenses**) vorherzusagen. Dabei nutzen wir die Konzepte der **Recipes** und **Workflows**, um unsere Datenvorverarbeitung und das Training zu strukturieren.
+
+**Recipes**: 
+- Ein **Recipe** beschreibt die Schritte der Datenvorverarbeitung, z. B. die Handhabung fehlender Werte, das Skalieren von Features oder die Erstellung von Dummy-Variablen.
+- Recipes sorgen für eine saubere Trennung zwischen Vorverarbeitung und Modelltraining.
+
+**Workflows**: 
+- Ein **Workflow** kombiniert ein Recipe und ein Modell, um alle Schritte – von der Datenvorbereitung bis zum Modelltraining – konsistent und reproduzierbar auszuführen.
+
+
+
+# 2 Packages
+```{r}
+# install.packages("mice")
+# install.packages("rpart")
+# install.packages("tidymodels")
+
+#install.packages("rlang")
+```
+
+# 3 Libraries
+```{r, warning=FALSE, include=FALSE}
+# Data Manipulation und Wrangling
+library(dplyr)        # Datenmanipulation, Verwandlung und Summarization
+library(tidyverse)    # Sammlung von Paketen für Datenmanipulation und Visualisierung (inkl. dplyr, ggplot2, etc.)
+library(magrittr)     # Pipe-Operator (%>%) für die Verkettung von Funktionen
+library(tibble)       # Erstellen von Data Frames als tibble (eine modernisierte Form von Data Frames)
+
+# Machine Learning und Modellierung
+library(caret)        # Hauptbibliothek für maschinelles Lernen in R (Modelltraining, Cross-Validation, etc.)
+library(parsnip)      # Einfacher Zugriff auf Modelle, ohne sich um die spezifische Modellimplementation zu kümmern
+library(workflows)    # Modell-Workflows zur Strukturierung von Prozessen (Modell + Rezept + Daten)
+library(tune)         # Hyperparameter-Tuning (z.B. Grid Search)
+library(ranger)       # Random Forest (insbesondere Random Forest mit schnellen Berechnungen)
+library(xgboost)      # XGBoost: Leistungsstarke Gradient Boosting Machine für strukturierte Daten
+library(randomForest) # Alternativ für Random Forest (klassische Implementierung)
+library(rsample)      # Datensplitting und Resampling-Techniken (z.B. Trainings-/Testset teilen)
+
+# Modellierung (Zusatz)
+library(tidymodels)   # Sammlung von Paketen für maschinelles Lernen mit tidyeigenen Prinzipien
+library(dials)        # Hyperparameter-Tuning-Tools, um Hyperparameter-Bereiche festzulegen
+library(tuneRanger)   # Hyperparameter-Tuning für Ranger (Random Forest-Implementierung)
+
+# Explorative Datenanalyse (EDA) und Visualisierung
+library(ggplot2)      # Visualisierung (Grafiken und Diagramme)
+library(correlationfunnel) # Korrelationsermittlung und Visualisierung
+library(skimr)        # Überblick und Zusammenfassung der Daten
+library(DataExplorer) # Automatisierte Explorative Datenanalyse (EDA)
+
+# Imputation und Fehlwertbehandlung
+library(mice)         # Multiple Imputation von fehlenden Werten
+
+# Daten Einlesen und Verarbeitung
+library(readr)        # Schnelles Einlesen von Daten (z.B. CSV, TSV)
+
+# Zeitmessung
+library(tictoc)       # Zeitmessung (Timing von Code-Ausführungen)
+
+```
+
+
+# 4 Datensatz
+```{r, warning=FALSE, include=FALSE}
+
+insurance <- read_csv("Data/Versicherung.csv")
+```
+
+```{r, warning=FALSE, include=FALSE}
+#insurance <- read_csv("Data/insurance.csv")
+head(insurance,10)
+```
+
+# 5 EDA
+```{r}
+insurance %>% skim()
+insurance %>% plot_missing()
+```
+
+
+
+Imputation Mithilfe der Bayesische Lineare Regression (norm.nob)
+```{r, include=FALSE}
+imputed_data <- mice(
+  insurance,
+  method = "norm.nob",
+  m = 5,                  # Anzahl der Imputationssets
+  maxit = 10,             # Maximale Anzahl von Iterationen
+  seed = 123              # Seed für die Reproduzierbarkeit
+ )
+
+# Zusammenführung der imputierten Daten
+imputed_df <- complete(imputed_data) %>% 
+  as.data.frame() %>% 
+mutate_all(~ if(is.character(.)) as.factor(.) else .)
+```
+
+
+```{r}
+imputed_df %>% plot_missing()
+```
+```{r}
+library(ggplot2)
+# Beispiel für Ihren ggplot Boxplot
+ggplot(imputed_df, aes(x = region, y = expenses, fill = region)) +
+  geom_boxplot(color = "black", outlier.color = "red", outlier.shape = 16) +
+  scale_fill_manual(values = c("lightblue", "lightgreen", "lightpink", "lightyellow")) +
+  labs(
+    title = "Ausgaben in verschiedenen Regionen",
+    x = "Region",
+    y = "Ausgaben"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "none"
+  )
+```
+# Außreißer Detection
+```{r}
+# Ausreißer-Werte extrahieren
+bp <- boxplot(imputed_df$expenses, plot = FALSE)
+
+outliers <- imputed_df[imputed_df$expenses %in% bp$out, ]
+print(outliers)
+```
+ 
+ Nun ist unser Datensatz vollständig und wir Können das ML-workdflow starten
+ 
+ # 6 Splitting Datensatz für ML
+```{r}
+# Split in Train und Test Sets
+set.seed(123)
+split_data <- initial_split(imputed_df, prop = 0.7, strata = "expenses") # strata 
+train_data <- training(split_data)
+test_data <- testing(split_data)
+```
+
+
+# 6b Correlationfunnerl
+```{r,  warning=FALSE}
+imputed_df %>% 
+  select(expenses, everything()) %>% 
+  binarize() %>% 
+  correlate("expenses__16639.915_Inf") %>% 
+  plot_correlation_funnel()
+```
+
+# 7 Erstellen eines Rezepts
+```{r}
+insurance_recipe <- recipe(expenses ~ ., data = train_data) %>%
+  step_impute_knn(all_predictors()) %>%
+  step_string2factor(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_center(all_numeric_predictors()) %>%
+  step_scale(all_numeric_predictors())
+
+```
+
+
+# 8 Allg. Workflow erstellen 
+--> Vermeidung von Bake und Prep --> Automatisierung
+```{r}
+# Workflow erstellen und das Rezept hinzufügen
+insurance_workflow <- workflow() %>%
+  add_recipe(insurance_recipe)
+
+```
+
+
+# 9 Lineares Modell mit Workflow
+```{r}
+# Hinzufügen des linearen Modells zum Workflow
+lm_workflow <- insurance_workflow %>%
+  add_model(linear_reg() %>% set_engine("lm"))
+
+# Trainieren des Workflows mit dem linearen Modell
+lm_fit <- lm_workflow %>% 
+  fit(data = train_data)
+
+# Vorhersagen auf den Testdaten
+lm_predictions <- lm_fit %>% 
+  predict(new_data = test_data) %>%
+  bind_cols(test_data)
+
+# Berechnung der RMSE für das lineare Modell
+lm_rmse <- lm_predictions %>%
+  mutate(error = .pred - expenses) %>%
+  summarise(rmse = sqrt(mean(error^2))) %>%
+  pull(rmse)
+
+cat("Root Mean Squared Error (Linear Regression):", lm_rmse, "\n")
+
+```
+
+# 10 Support Vector Machine (SVM) mit Workflow und Hyperparameter-Tuning
+
+Erklärung der Parameter:
+Die Kreuzvalidierung wird mit einer Rastersuche für Hyperparameter kombiniert. In deinem Fall sind die Hyperparameter C und Sigma, die für die SVM mit radialer Kernel-Funktion relevant sind. Die Rastersuche durchläuft verschiedene Kombinationen von C- und Sigma-Werten und wählt diejenigen aus, die die beste Leistung auf den Validierungssets zeigen:
+
+C: Der Parameter C ist der Kostenparameter (Cost), der die Strafe für Fehler auf Trainingsdaten kontrolliert. Ein kleines C führt zu einem weichen (soft) Margin, was bedeutet, dass das Modell mehr Fehler auf den Trainingsdaten zulässt, um eine glattere Entscheidungsgrenze zu erhalten. Ein großes C führt zu einem harten (hard) Margin, wodurch das Modell versucht, alle Trainingsdaten korrekt zu klassifizieren, auch wenn dies zu einer unebenen Entscheidungsgrenze führen kann.
+
+Sigma: ist der Parameter, der die Breite des radialen Basisfunktionen-Kernels steuert. Eine kleinere Sigma-Wert führt zu schärferen, spitzen Entscheidungsgrenzen und kann zu einer Überanpassung führen. Ein größerer Sigma-Wert führt zu glatteren Entscheidungsgrenzen, was zu einer besseren Generalisierung, aber möglicherweise auch zu einer geringeren Empfindlichkeit des Modells führen kann.
+```{r}
+# Lade das caret-Paket für maschinelles Lernen
+library(caret)
+
+# Definiere die Steuerung für eine Kreuzvalidierung mit Rastersuche
+ctrl <- trainControl(method = "cv", number = 10)
+
+# Definiere das Raster für die Hyperparameter C und Sigma
+grid <- expand.grid(C = c(0.1, 1, 10, 100),
+                   sigma = c(0.01, 0.1, 1, 10))
+
+
+
+# Führe die Rastersuche durch und trainiere das SVM-Modell mit radialer Kernel-Funktion
+        #Flexibilität: Der RBF-Kernel ist flexibel und kann nicht-lineare Beziehungen zwischen den Features und 
+        #der Zielvariable abbilden. Das ermöglicht die Erfassung von komplexen Muster in den Daten.
+
+        #Vielseitigkeit:
+        #komplexe und nichtlineare Entscheidungsgrenzen zu modellieren
+
+# fit <- train(expenses ~ ., data = prepped_train_data, method = "svmRadial",
+#              trControl = ctrl, tuneGrid = grid)
+# 
+# test_fit<- train(my_first_recipe,data = train_data, method = "svmRadial",
+#              trControl = ctrl, tuneGrid = grid)
+# summary(test_fit)
+# # Gib eine Zusammenfassung des besten Modells aus
+# summary(fit)
+
+tic()
+fit<- caret::train(insurance_recipe, 
+            data = train_data,
+            method = "svmRadial",
+            trControl = ctrl,
+            tuneGrid = grid
+            )
+toc()
+
+
+
+
+prediction_fit<- predict(fit, newdata=test_data)
+
+performance <- sqrt(mean((prediction_fit - test_data$expenses)^2))
+cat("Root Mean Squared Error (SVM):", performance, "\n")
+
+
+```
+# Alternativ mit Workflow
+```{r, warning=FALSE,include=FALSE}
+# Definiere das Modell: SVM mit radialem Kernel (mit kernlab als Engine)
+svm_model <- svm_rbf(
+  cost = tune(),# Hyperparameter, der optimiert werden soll
+  rbf_sigma=tune()
+  ) %>%
+  set_engine("kernlab") %>%  # Verwende den "kernlab" Engine
+  set_mode("regression")  # Regression, da es um die Vorhersage einer kontinuierlichen Variablen geht
+
+
+
+# Erstelle den Workflow: Kombination von Modell und Rezept
+svm_workflow <- workflow() %>%
+  add_recipe(insurance_recipe) %>%
+  add_model(svm_model)
+
+# Definiere das Tuning-Grid (hier nur den 'cost' Hyperparameter)
+tune_grid <- expand.grid(
+  cost = c(0.1, 1, 10, 100),
+  rbf_sigma = c(0.01, 0.1, 1, 10)
+)
+
+# Definiere den Kontrollmechanismus für das Cross-Validation
+# `control_grid` wird verwendet anstelle von `trainControl`
+ctrl <- control_grid(
+  save_pred = TRUE,  # Speichere die Vorhersagen während des Tuning-Prozesses
+  verbose = TRUE  # Gib mehr Informationen aus
+)
+
+# Durchführung der Hyperparameter-Suche mit `tune_grid`
+tuned_results <- tune_grid(
+  object = svm_workflow,
+  resamples = vfold_cv(train_data, v = 5),  # 5-fache Kreuzvalidierung
+  grid = tune_grid,
+  control = ctrl
+)
+
+# Überprüfe die besten Parameter und die Leistung
+ best_params <- tuned_results %>%
+   select_best(metric = "rmse")
+
+
+# Trainiere das endgültige Modell mit den besten Parametern
+final_model <- finalize_workflow(svm_workflow, best_params)
+
+# Trainiere das endgültige Modell auf den gesamten Trainingsdaten
+final_fit <- fit(final_model, data = train_data)
+
+# Mache Vorhersagen auf den Testdaten
+predictions <- predict(final_fit, new_data = test_data) %>%
+  bind_cols(test_data)
+
+# Berechne den Root Mean Squared Error (RMSE)
+performance <- rmse(predictions, truth = expenses, estimate = .pred)
+cat("Root Mean Squared Error (SVM):", performance$.estimate, "\n")
+```
+
+
+
+# 12 RF mit Ranger Engine
+```{r, include=FALSE, warning=FALSE}
+
+# Definiere das Modell: Random Forest (mit ranger als Engine)
+rf_model <- rand_forest(
+  mtry = tune(),        # Hyperparameter für mtry
+  trees = tune()        # Hyperparameter für num.trees
+) %>%
+  set_engine("ranger") %>%
+  set_mode("regression")  # Regression, da es um die Vorhersage einer kontinuierlichen Variablen geht
+
+# Erstelle den Workflow: Kombination von Modell und Rezept
+rf_workflow <- workflow() %>%
+  add_recipe(insurance_recipe) %>%
+  add_model(rf_model)
+
+# Erstelle den Tuning-Grid
+tune_grid <- expand.grid(
+  trees = c(100, 200, 300, 400, 500),
+  mtry = c(2, 4, 6)
+)
+
+# Definiere den Kontrollmechanismus für das Cross-Validation
+ctrl <- control_grid(  # Nutze die Funktion aus `tune`
+  verbose = TRUE,      # Zeige detaillierte Ausgaben
+  save_pred = TRUE     # Speichere Vorhersagen für spätere Auswertung
+)
+
+# Durchführung der Hyperparameter-Suche mit `tune_grid`
+tuned_results <- tune_grid(
+  object = rf_workflow,
+  resamples = vfold_cv(train_data, v = 5),  # 5-fache Kreuzvalidierung
+  grid = tune_grid,  # Übergeben des definierten Grids
+  control = ctrl     # Korrigierte Kontroll-Instanz
+)
+
+
+
+# Überprüfe die besten Parameter und die Leistung
+best_params <- tuned_results %>%
+  select_best(metric = "rmse")  # Wählen Sie das beste Modell basierend auf RMSE
+
+# Drucke die besten Tuning-Parameter
+cat("Beste Tuning-Parameter:\n")
+print(best_params)
+
+# Trainiere das endgültige Modell mit den besten Parametern
+final_model <- finalize_workflow(rf_workflow, best_params)
+
+# Trainiere das endgültige Modell auf den gesamten Trainingsdaten
+final_fit <- fit(final_model, data = train_data)
+
+# Mache Vorhersagen auf den Testdaten
+predictions <- predict(final_fit, new_data = test_data) %>%
+  bind_cols(test_data)
+
+# Berechne den Root Mean Squared Error (RMSE)
+performance <- rmse(predictions, truth = expenses, estimate = .pred)
+
+# Drucke die Leistung des besten Modells
+cat("Root Mean Squared Error (Random Forest):", performance$.estimate, "\n")
+
+```
+
+
+# Mehrere Modelle Trainieren & Selektieren
+```{r, include=FALSE}
+
+# Definiere mehrere Modelle:
+# 1. Random Forest Modell
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune()
+) %>%
+  set_engine("ranger") %>%
+  set_mode("regression")
+
+# 2. XGBoost Modell
+xgb_model <- boost_tree(
+  trees = tune(),
+  tree_depth = tune(),
+  learn_rate = tune()
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+# 3. Lineares Modell
+lm_model <- linear_reg() %>%
+  set_engine("lm") %>%
+  set_mode("regression")
+
+# Kombiniere die Modelle mit Workflows
+rf_workflow <- workflow() %>%
+  add_recipe(insurance_recipe) %>%
+  add_model(rf_model)
+
+xgb_workflow <- workflow() %>%
+  add_recipe(insurance_recipe) %>%
+  add_model(xgb_model)
+
+lm_workflow <- workflow() %>%
+  add_recipe(insurance_recipe) %>%
+  add_model(lm_model)
+
+# Erstelle das Tuning-Grid für jedes Modell
+rf_grid <- grid_regular(
+  mtry(range = c(2, 6)),
+  trees(range = c(100, 500)),
+  levels = 5
+)
+
+xgb_grid <- grid_regular(
+  trees(range = c(100, 500)),
+  tree_depth(range = c(3, 10)),
+  learn_rate(range = c(0.01, 0.3)),
+  levels = 5
+)
+
+# Kontrollmechanismus für Cross-Validation
+ctrl <- control_grid(
+  verbose = TRUE,
+  save_pred = TRUE
+)
+
+# Cross-Validation
+cv_folds <- vfold_cv(train_data, v = 5)
+
+# Hyperparameter-Tuning für jedes Modell
+rf_results <- tune_grid(
+  object = rf_workflow,
+  resamples = cv_folds,
+  grid = rf_grid,
+  control = ctrl
+)
+
+xgb_results <- tune_grid(
+  object = xgb_workflow,
+  resamples = cv_folds,
+  grid = xgb_grid,
+  control = ctrl
+)
+
+lm_results <- fit_resamples(
+  lm_workflow,
+  resamples = cv_folds,
+  control = ctrl
+)
+
+
+# Extrahiere die besten RMSE-Werte korrekt
+metrics_rf <- rf_results %>% collect_metrics()
+print(metrics_rf)
+
+# Für Random Forest
+rf_best_rmse <- rf_results %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%  # Filtere nur RMSE
+  arrange(mean) %>%  # Sortiere nach mean (niedrigster RMSE zuerst)
+  slice_head(n = 1) %>%  # Wähle die erste Zeile
+  pull(mean)  # Extrahiere den Wert der Spalte mean
+
+# Für XGBoost
+xgb_best_rmse <- xgb_results %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%  # Filtere nur RMSE
+  arrange(mean) %>%  # Sortiere nach mean (niedrigster RMSE zuerst)
+  slice_head(n = 1) %>%  # Wähle die erste Zeile
+  pull(mean)  # Extrahiere den Wert der Spalte mean
+
+# Für Lineares Modell
+lm_best_rmse <- lm_results %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%  # Filtere nur RMSE
+  arrange(mean) %>%  # Sortiere nach mean (niedrigster RMSE zuerst)
+  slice_head(n = 1) %>%  # Wähle die erste Zeile
+  pull(mean)  # Extrahiere den Wert der Spalte mean
+
+# Zusammenführen der Ergebnisse in einer Tabelle
+model_results <- tibble(
+  model = c("Random Forest", "XGBoost", "Linear Model"),
+  rmse = c(rf_best_rmse, xgb_best_rmse, lm_best_rmse)
+)
+
+# Finde das Modell mit der niedrigsten RMSE
+ <- model_results %>%
+  arrange(rmse) %>%
+  dplyr::slice(1) 
+
+```
+
+
+# Retrain Best Model -
+```{r}
+
+# Trainiere das finale Modell basierend auf dem besten Ergebnis
+if (best_model$model == "Random Forest") {
+  final_model <- finalize_workflow(
+    rf_workflow, 
+    select_best(rf_results, metric = "rmse")  # Korrigierter Aufruf
+  )
+} else if (best_model$model == "XGBoost") {
+  final_model <- finalize_workflow(
+    xgb_workflow, 
+    select_best(xgb_results, metric = "rmse")  # Korrigierter Aufruf
+  )
+} else {
+  final_model <- lm_workflow
+}
+
+
+final_fit <- fit(final_model, data = train_data)
+
+# Mache Vorhersagen auf den Testdaten
+predictions <- predict(final_fit, new_data = test_data) %>%
+  bind_cols(test_data)
+
+# Berechne die finale RMSE
+performance <- rmse(predictions, truth = expenses, estimate = .pred)
+
+# Drucke die Performance des besten Modells
+cat("Root Mean Squared Error (bestes Modell):", performance$.estimate, "\n")
+```
+ **Random Forest Modell: Zusammenfassung**
+
+ Modelltyp: **Regression**
+ Das Modell ist auf die Vorhersage von kontinuierlichen Zielvariablen ausgelegt.
+
+ **Wichtige Hyperparameter und Modellkonfiguration**
+
+ - **Number of trees:** *500*
+   - Das Modell wurde mit 500 Entscheidungsbäumen trainiert. Eine höhere Anzahl stabilisiert die Ergebnisse, erhöht jedoch die Rechenzeit.
+ 
+ - **Sample size:** *934*
+   - Anzahl der Trainingsbeispiele, die für den Bau der Bäume verwendet wurden.
+ 
+ - **Number of independent variables:** *8*
+   - Insgesamt 8 unabhängige Variablen (Features) wurden für das Training verwendet.
+ 
+ - **Mtry:** *4*
+   - Bei jedem Split eines Baumes wurden 4 zufällige Variablen berücksichtigt.
+ 
+ - **Target node size:** *5*
+   - Jeder Endknoten (Blatt) im Entscheidungsbaum enthält mindestens 5 Beobachtungen.
+ 
+ - **Variable importance mode:** *none*
+   - Es wurde keine Berechnung der Variablenbedeutung durchgeführt. Dies könnte optional aktiviert werden.
+
+**Splitregel**
+ - **Splitrule:** *variance*
+   - Die Varianzreduktion wird als Kriterium für das Aufteilen der Knoten verwendet, was typisch für Regressionsaufgaben ist.
+
+ **Modellleistung**
+ - **OOB prediction error (MSE):** *22440990*
+   - Der mittlere quadratische Fehler (Mean Squared Error, MSE) basierend auf den Out-of-Bag (OOB) Beobachtungen.
+ 
+ - **R squared (OOB):** *0.8509801*
+   - Der R²-Wert misst, wie viel der Zielvariablen durch die unabhängigen Variablen erklärt wird. Ein Wert von **0.85** bedeutet, dass **85% der Varianz** durch das Modell erklärt werden können, was auf eine gute Anpassung hindeutet.
+
+
+
+```{r}
+# Lade ggplot2 für die Visualisierung
+# library(ggplot2)
+# 
+# # Extrahiere die Metriken aus den Cross-Validation-Ergebnissen
+# tuning_metrics <- rf_results %>% collect_metrics()
+# 
+# # Visualisiere die Metriken (z. B. RMSE)
+# ggplot(tuning_metrics, aes(x = .config, y = mean, color = .metric)) +
+#   geom_point() +
+#   geom_line() +
+#   facet_wrap(~ .metric, scales = "free_y") +
+#   labs(
+#     title = "Trainingsevolution für Random Forest",
+#     x = "Modellkonfiguration",
+#     y = "Metrik (niedriger ist besser)"
+#   )
+
+```
+
+# SVM: Alternative Engines:
+
+# **<span style="color: #0073e6">1.Kernlab(Standard-Engine für SVM)</span>**
+ 
+ - **Beschreibung:** Implementiert Support Vector Machines mit flexiblen Kernel-Optionen wie linear, radial, oder polynomial.
+ - **Vorteile:** Einfach zu verwenden, flexibel, gute Leistung bei kleinen bis mittelgroßen Datensätzen.
+ - **Beispiel:**
+
+svm_rbf(cost = tune(), rbf_sigma = tune()) %>%
+set_engine("kernlab") %>%
+set_mode("classification")
+
+# **<span style="color: #0073e6">2. LiquidSVM </span>**
+ 
+ - **Beschreibung:** Hochoptimierte SVM-Bibliothek für sehr große Datensätze.
+ - **Vorteile:** Schnelle Berechnungen durch effiziente Parallelisierung und numerische Optimierung.
+ - **Nachteile:** Weniger dokumentiert und erfordert Installation des externen LiquidSVM-Pakets.
+ - **Beispiel:**
+ 
+svm_rbf(cost = tune(), rbf_sigma = tune()) %>%
+set_engine("liquidSVM") %>%
+set_mode("classification")
+
+
+# **<span style="color: #0073e6">3. LiblineaR**
+ 
+ - **Beschreibung:</span>** Implementiert lineare SVMs mit Fokus auf Effizienz für sehr große, sparse Datensätze.
+ - **Vorteile:** Ideal für Probleme mit sehr vielen Features und wenigen Beobachtungen.
+ - **Nachteile:** Unterstützt nur lineare Kernel.
+ - **Beispiel:**
+svm_linear(cost = tune()) %>%
+  set_engine("LiblineaR") %>%
+  set_mode("classification")
+
+
+# Random Forest Alternative engines:
+
+
+# **<span style="color: #0073e6">1. Ranger (Standard-Engine für Random Forest)</span>**
+
+ - **Beschreibung:** Schnelle und effiziente Implementierung von Random Forests, optimiert für große Datensätze.
+ - **Vorteile:** Ressourcenfreundlich, unterstützt parallele Berechnungen und bietet viele Optionen wie `splitrule` und OOB-Schätzungen.
+ - **Beispiel:**
+rand_forest(mtry = tune(), trees = tune()) %>%
+  set_engine("ranger") %>%
+  set_mode("regression")
+
+# **<span style="color: #0073e6">2. RandomForest</span>**
+ 
+ - **Beschreibung:** Die klassische Implementierung von Random Forest in R.
+ - **Vorteile:** Einfach zu verwenden, gut dokumentiert.
+ - **Nachteile:** Langsam bei großen Datensätzen und nicht für paralleles Rechnen optimiert.
+ - **Beispiel:**
+rand_forest(mtry = tune(), trees = tune()) %>%
+  set_engine("randomForest") %>%
+  set_mode("regression")
+
+# **<span style="color: #0073e6">3. Spark (sparklyr)</span>**
+
+ - **Beschreibung:** Distributed Random Forest, Teil von Spark MLlib.
+ - **Vorteile:** Ideal für sehr große Datensätze, die auf verteilten Systemen gespeichert sind.
+ - **Nachteile:** Erfordert ein Spark-Cluster oder lokale Spark-Installation.
+ - **Beispiel:**
+
+rand_forest(mtry = tune(), trees = tune()) %>%
+  set_engine("spark") %>%
+  set_mode("regression")
+
+# **<span style="color: #0073e6">4. party (cforest)</span>**
+
+ - **Beschreibung:** Implementiert Conditional Inference Forests, eine alternative RF-Variante.
+ - **Vorteile:** Statistisch fundiertere Split-Regeln; ideal, wenn viele kategoriale Variablen oder komplexe Abhängigkeiten vorliegen.
+ - **Nachteile:** Langsam bei großen Datensätzen.
+ - **Beispiel:**
+rand_forest(mtry = tune(), trees = tune()) %>%
+  set_engine("party") %>%
+  set_mode("regression")
+
+
+
+
