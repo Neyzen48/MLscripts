@@ -1,0 +1,193 @@
+Below is an example of a complete R Markdown (.Rmd) script that incorporates your provided R script. You can save this as, for example, `analysis.Rmd` and then knit it to your desired output format (HTML, PDF, etc.).
+
+```markdown
+---
+title: "Time Series Forecasting with Holidays and Model Averaging"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Introduction
+
+This document demonstrates an end-to-end workflow for time series forecasting by enhancing sales data with holiday events. The process involves:
+  
+- Loading and merging holiday event data.
+- Splitting the time series into training and testing sets.
+- Training multiple forecasting models (Prophet, Prophet Boost, and Linear Regression).
+- Calibrating and forecasting on the test set.
+- Re-fitting models on the full dataset.
+- Averaging forecasts from different models for improved performance.
+
+# Setup
+
+Make sure to load the required packages. You may need to install any packages that are not already available in your R environment.
+
+```{r setup, include=FALSE}
+# Load necessary libraries
+library(tidyverse)
+library(lubridate)
+library(timetk)
+library(modeltime)
+library(prophet)
+# Other packages (such as xgboost) may be needed depending on your installation
+
+# Set global chunk options
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data Preparation
+
+First, we load the holiday events data and merge it with the sales data. The `holiday_flag` is created to indicate whether a date corresponds to a holiday event.
+
+```{r load-data}
+# Load the holidays events data
+holidays_events <- read_csv("Praxis/store-sales-time-series-forecasting/holidays_events.csv")
+
+# Assuming Party_df is pre-loaded with your sales data, merge holiday events
+Party_holidays_promo <- Party_df %>% 
+  left_join(holidays_events, by = "date") %>% 
+  mutate(holiday_flag = ifelse(is.na(type), 0, 1))
+```
+
+# Data Splitting
+
+Next, we split the data into training and testing sets using a time series split. The testing set is set to assess one year of data while keeping a cumulative training set.
+
+```{r time-series-split}
+splits <- time_series_split(Party_holidays_promo, assess = "1 year", cumulative = TRUE)
+```
+
+# Retraining Models
+
+We will train three different models: Prophet, Prophet Boost, and a Linear Regression (LM) model.
+
+## Prophet Model
+
+```{r prophet-model}
+Prophet_model <- prophet_reg() %>%
+  set_engine("prophet") %>%
+  fit(
+    sales ~ date + onpromotion + holiday_flag,
+    data = training(splits)
+  )
+```
+
+## Prophet Boost Model
+
+```{r prophet-boost-model}
+Prophet_boost_model <- prophet_boost() %>%
+  set_engine("prophet_xgboost") %>%
+  fit(
+    sales ~ date + as.numeric(date) + month(date, label = TRUE) + onpromotion + holiday_flag, 
+    data = training(splits)
+  )
+```
+
+## Linear Regression Model
+
+```{r linear-model}
+LM_model <- linear_reg() %>%
+  set_engine("lm") %>%
+  fit(
+    sales ~ as.numeric(date) + month(date, label = TRUE) + onpromotion + holiday_flag,
+    data = training(splits)
+  )
+```
+
+# Modeltime Table and Calibration
+
+The models are then combined into a modeltime table and calibrated on the testing data.
+
+```{r modeltime-table}
+model_tbl <- modeltime_table(
+  Prophet_model,
+  Prophet_boost_model,
+  LM_model
+)
+
+calibration_tbl <- model_tbl %>%
+  modeltime_calibrate(testing(splits))
+```
+
+You can review model performance using the accuracy table:
+
+```{r model-accuracy}
+calibration_tbl %>%
+  modeltime_accuracy() %>%
+  table_modeltime_accuracy(resizable = TRUE, bordered = TRUE)
+```
+
+# Forecasting
+
+Forecast the future values with the calibrated models and visualize the results.
+
+## Forecast on Testing Data
+
+```{r forecast-testing}
+calibration_tbl %>%
+  modeltime_forecast(
+    new_data = testing(splits),
+    actual_data = Party_holidays_promo,
+    conf_interval = 0.95
+  ) %>%
+  plot_modeltime_forecast(.legend_show = TRUE, .legend_max_width = 25)
+```
+
+## Refit Models on All Data and Forecast
+
+Refit the calibrated models using the entire dataset and generate forecasts on the testing data.
+
+```{r refit-forecast}
+refit_tbl <- calibration_tbl %>%
+  modeltime_refit(data = Party_holidays_promo)
+
+forecast_tbl <- refit_tbl %>%
+  modeltime_forecast(
+    new_data = testing(splits),
+    actual_data = Party_holidays_promo,
+    conf_interval = 0.95
+  )
+
+# Plot interactive forecast if supported by your output device
+forecast_tbl %>%
+  plot_modeltime_forecast(.interactive = TRUE)
+```
+
+# Model Averaging
+
+Here, we perform model averaging by grouping the forecasts (excluding the actual values) and computing the mean prediction along with confidence intervals.
+
+```{r model-averaging}
+mean_forcast_tbl <- forecast_tbl %>%
+  filter(.key != "actual") %>%
+  group_by(.key, .index) %>%  # Group all predictions for one date
+  summarise(across(.value:.conf_hi, mean)) %>%  # Compute the mean for each forecast metric
+  mutate(
+    .model_id = 3,     # Denotes the number of models used
+    .model_desc = "Average of Models"
+  )
+
+# Combine actual values with the averaged forecasts and plot
+forecast_tbl %>%
+  filter(.key == "actual") %>%
+  bind_rows(mean_forcast_tbl) %>%
+  plot_modeltime_forecast()
+```
+
+# Accessing the Forecast Values
+
+If you want to inspect the numeric forecast values, you can do so with:
+
+```{r forecast-values}
+forecast_tbl$.value
+```
+
+# Conclusion
+
+This R Markdown document outlines a complete forecasting workflow that incorporates holiday events into the modeling process. We trained multiple models, calibrated their performance, generated forecasts, and finally applied model averaging to enhance the predictions.
+
+Feel free to adjust the code and add further commentary as needed for your analysis.
+```
+
+This script is self-contained and designed to guide you through the steps of data loading, model training, forecasting, and evaluation—all within an R Markdown framework.

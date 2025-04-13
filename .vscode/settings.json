@@ -1,0 +1,8 @@
+{
+    "r.bracketedPaste": true,
+    "r.sessionWatcher": true,
+    "r.alwaysUseActiveTerminal": true,
+    "r.rterm.windows": "C:\\Program Files\\R\\R-4.4.3\\bin\\R.exe",
+    "r.rmarkdown.knit.useBackgroundProcess": false,
+    "r.rmarkdown.knit.openOutputFile": true,
+}
