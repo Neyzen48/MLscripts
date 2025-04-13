@@ -1,5 +1,5 @@
 ---
-title: "KI Prüfunsergebnisse mit LR und ML (Muster)"
+title: "KI Prüfungscript - LR und ML - Muster"
 date: "`r Sys.Date()`"
 output: html_document
 ---
@@ -137,3 +137,6 @@ predict(final_wf, penguin_test[55,])
 ```
 
 You can save this fitted `final_wf` object to use later with new data, for example with `readr::write_rds()`.
+
+```{r}
+```
