@@ -1,0 +1,284 @@
+---
+title: "Aufgabenblatt 3"
+subtitle: "Vorhersage der Überlebensrate auf der Titanic mit logistischer Regression in R"
+author: "Ömer Faruk Torun"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,        # show code
+  message = TRUE,     # show messages
+  warning = TRUE,     # show warnings
+  results = "show",   # ensure full results are shown
+  max.print = 10000   # increase this t- show more output if needed
+)
+```
+
+# Hintergrund
+
+Sie sollen mithilfe von logistischer Regression und anderen Klassifikationsmethoden vorhersagen, ob ein Passagier die Titanic-Katastrophe überlebt hätte. Dazu nutzen Sie den Titanic-Datensatz und vergleichen verschiedene Modellansätze. Ihr Ziel ist es, durch Explorative Datenanalyse (EDA) und den Einsatz von verschiedenen Modellen eine möglichst präzise Vorhersage zu treffen. Anschließend testen Sie Ihr Modell mit neuen Passagieren.
+
+\newpage
+
+# Schritt 1: Daten einlesen & erste Analyse (EDA)
+Laden Sie den Titanic-Datensatz und verschaffen Sie sich mit glimpse() einen Überblick.
+
+```{R}
+library(tidyverse)
+titanic_data <- read.csv("data/titanic.csv", sep = ";") %>%
+  mutate(across(c(Survived, Pclass, Sex, Embarked), as.factor))
+glimpse(titanic_data)
+```
+
+Untersuchen Sie die Verteilung der Zielvariable (Survived) und analysieren Sie erste Zusammenhänge, z. B.:
+
+## a. Unterschiede nach Geschlecht (Sex)
+```{r}
+library(ggplot2)
+titanic_data %>%
+  group_by(Sex) %>%
+  summarize(Survived) %>%
+  ggplot(aes(
+    x = Sex,
+    y = Survived,
+    fill = Sex
+  )) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Überlebensrate nach Geschlecht",
+    x = "Geschlecht",
+    y = "Überlebensrate"
+  )
+```
+
+## b. Unterschiede nach Ticketklasse (Pclass)
+
+```{r}
+library(ggplot2)
+titanic_data %>%
+  group_by(Pclass, Survived) %>% # Gruppierung nach Pclass und Survived
+  summarize( # Zusammenfassen der Daten
+    count = n(), # Anzahl der Passagiere pro Gruppe
+    .groups = "drop" # Entfernen der Gruppierung
+  ) %>%
+  mutate(Survived = factor( # Umwandeln in einen Faktor
+    Survived, # Überlebensstatus
+    levels = c(0, 1), # Festlegen der Levels
+    labels = c("Nicht Überlebt", "Überlebt") # Festlegen der Labels
+  )) %>% # Umwandeln der Survived-Variable in einen Faktor
+  ggplot(aes( # Erstellen des Plots
+    x = factor(Pclass), # Umwandeln in einen Faktor
+    y = count, # Anzahl der Passagiere
+    fill = Survived # Färben nach Überlebensstatus
+  )) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Anzahl der Überlebenden und nicht Überlebenden nach Ticketklasse",
+    x = "Ticketklasse",
+    y = "Anzahl",
+    fill = "Status"
+  )
+```
+
+## c. Einfluss des Alters (Age)
+
+```{r}
+summary(titanic_data$Age)
+titanic_data %>%
+  filter(Age >= 0, Age <= 100) %>%
+  ggplot(
+    aes(
+      x = Age,
+      fill = factor(
+        Survived,
+        levels = c(0, 1),
+        labels = c("Nicht Überlebt", "Überlebt")
+      )
+    )
+  ) +
+  geom_histogram(binwidth = 5, position = "identity", alpha = 0.5) +
+  labs(
+    title = "Verteilung des Alters nach Überlebensstatus",
+    x = "Alter",
+    y = "Anzahl der Passagiere",
+    fill = "Überlebensstatus"
+  )
+```
+
+3. Überprüfen Sie fehlende Werte (NA) und überlegen Sie, wie Sie damit umgehen (Bspw. Imputation).
+
+```{r, results="hide"}
+library(DataExplorer) # Data exploration package
+plot_missing(titanic_data)
+library(mice)
+imputed_data <- mice(
+  titanic_data,
+  m = 10, # Anzahl der Imputationen
+  maxit = 10, # Iterationen
+  method = "pmm", # Predictive Mean Matching
+  seed = 123 # Zufallszahlengenerator
+)
+titanic_data_completed <- complete(imputed_data)
+```
+
+# Schritt 2: Datenvorbereitung & Feature Engineering
+
+```{r}
+set.seed(123) # Setzen des Zufallszahlengenerators für Reproduzierbarkeit
+library(tidymodels) # Laden des tidymodels-Pakets
+titanic_data_split <-
+  initial_split( # Aufteilen des Datensatzes in Trainings- und Testdaten
+    titanic_data_completed, # Datensatz
+    prop = 0.8 # Anteil der Trainingsdaten
+  )
+train_data <- training(titanic_data_split) # Trainingsdaten
+test_data <- testing(titanic_data_split) # Testdaten
+```
+
+# Schritt 3: Modelle testen & evaluieren
+
+## a. Logistische Regression
+
+Trainieren Sie eine logistische Regression (`glm()`).
+
+### Rezept für die logistische Regression
+
+```{r}
+titanic_data_recipe <- recipe(Survived ~ ., data = train_data) %>%
+  # Setzen der Rolle für PassengerId
+  update_role(PassengerId, new_role = "id") %>%
+  # Entfernen unnötiger Spalten
+  step_rm(Name) %>% # Entfernen der Spalte Name
+  # Umwandlung der Variablen in Faktoren
+  step_string2factor(Sex, Embarked) %>%
+  # Impute with Bagging
+  step_impute_bag(impute_with = imp_vars(all_predictors()), trees = 15) %>%
+  # Imputation mit dem Modus für Embarked
+  step_impute_mode(Embarked) %>%
+  # Umwandlung der kategorialen Variablen in Dummy-Variablen
+  step_dummy(all_nominal_predictors(), -all_outcomes()) %>%
+  # Normalisierung der Prädiktoren
+  step_normalize(all_numeric_predictors())
+summary(titanic_data_recipe)
+```
+
+### Modelltraining
+```{r}
+model_glm <- logistic_reg() %>%
+  set_engine("glm") %>% # general linearized model
+  set_mode("classification") # Binomiale Klassifikation
+
+workflow_glm <- workflow() %>%
+  add_recipe(titanic_data_recipe) %>%
+  add_model(model_glm)
+
+fit_glm <- workflow_glm %>%
+  fit(data = train_data)
+```
+
+### Modellbewertung
+
+```{r model_evaluation}
+predictions_glm <- fit_glm %>%
+  predict(new_data = test_data) %>%
+  as_tibble() %>% 
+  bind_cols(test_data) %>%
+  select(c(PassengerId, .pred_class, Survived, everything()))
+```
+
+
+### Support Vector Machine (SVM) (kernlab-Paket)
+
+```{r}
+model_svm <- svm_rbf(cost = 1, rbf_sigma = 0.1, mode = "classification") %>%
+  set_engine("kernlab")
+
+workflow_svm <- workflow() %>%
+  add_recipe(titanic_data_recipe) %>%
+  add_model(model_svm)
+
+fit_svm <- workflow_svm %>%
+  fit(data = train_data)
+```
+
+
+### Random Forest (randomForest-Paket)
+
+```{r}
+model_rf <- rand_forest(trees = 300, mtry = 3, mode = "classification") %>%
+  set_engine("ranger")
+
+workflow_rf <- workflow() %>%
+  add_recipe(titanic_data_recipe) %>%
+  add_model(model_rf)
+
+fit_rf <- workflow_rf %>%
+  fit(data = train_data)
+```
+
+## Modell Effizienz & Evaluation
+```{r}
+# Genauigkeit berechnen
+accuracy_value <- predictions_glm %>%
+  yardstick::accuracy(truth = Survived, estimate = .pred_class) %>%
+  pull()
+
+# Präzision berechnen
+precision_value <- predictions_glm %>%
+  yardstick::precision(truth = Survived, estimate = .pred_class) %>%
+  pull()
+
+# Rückruf (Recall) berechnen
+recall_value <- predictions_glm %>%
+  yardstick::recall(truth = Survived, estimate = .pred_class) %>%
+  pull()
+
+# Ausdrucken der Metriken
+cat("Accuracy:", accuracy_value, "\n")
+cat("Precision:", precision_value, "\n")
+cat("Recall:", recall_value, "\n")
+```
+
+```{r}
+conf_matrix <- conf_mat(
+  predictions_glm,
+  truth = Survived,
+  estimate = .pred_class
+)
+
+library(ggplot2)
+library(ggdist)
+autoplot(conf_matrix, type = "heatmap", scale = "count") +
+  ggtitle("Confusion Matrix") +
+  labs(x = "Predicted", y = "Actual") +
+```
+
+4. Wählen Sie das beste Modell aus und begründen Sie Ihre Entscheidung.\
+   **Hinweise zur Modellwahl:**
+    - Logistische Regression ist ein gutes Basismodell für binäre Klassifikation.
+    - SVM kann bei komplexeren Entscheidungsgrenzen helfen. Testen Sie verschiedene Kernelfunktionen (linear, radial).
+    - Random Forest kann nichtlineare Zusammenhänge erfassen und ist oft robuster gegenüber Ausreißern.
+
+# Schritt 4: Workflow mit tidymodels & Vorhersagen für neue Passagiere
+
+Aufgaben:
+
+1. Erstellen Sie eine Modellpipeline mit `recipes()`, `workflows()` und `parsnip()`.
+2. Nutzen Sie Cross-Validation (`rsample`), um die Performance der Modelle objektiv zu bewerten.
+3. Trainieren Sie das beste Modell auf den gesamten Datensatz.
+4. Laden Sie eine neue Passagierliste (`new_passengers.csv`) und sagen Sie deren Überlebenswahrscheinlichkeit vorher.\
+**Hinweise zur Modellimplementierung:**
+    - Verwenden Sie das tidymodels-Framework, um Ihre Modelle sauber zu strukturieren.
+    - `workflows()` hilft, Vorverarbeitung (`recipes()`) und Modelltraining zu kombinieren.
+    - Nutzen Sie predict(), um auf neue Passagiere angewendet zu werden.
+
+# Schritt 5: Präsentation der Ergebnisse
+
+Bereiten Sie eine kurze Präsentation mit folgenden Inhalten vor:
+
+1. EDA & Datenaufbereitung – Welche Entscheidungen wurden getroffen?
+2. Vergleich der Modelle – Welche Modelle wurden getestet und warum?
+3. Wahl des besten Modells – Welche Ergebnisse führten zur Entscheidung?
+4. Vorhersagen für neue Passagiere – Welche Unsicherheiten gibt es?

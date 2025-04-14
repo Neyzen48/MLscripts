@@ -1,0 +1,217 @@
+---
+title: "Aufgabenblatt 2"
+subtitle: "Car case study - Linerare Regression"
+author: "Ömer Faruk Torun"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,        # show code
+  message = TRUE,     # show messages
+  warning = TRUE,     # show warnings
+  results = 'show',   # ensure full results are shown
+  max.print = 10000   # increase this to show more output if needed
+)
+```
+
+# Einleitung
+
+In dieser Übung wird die lineare Regression als grundlegende Methode des maschinellen Lernens eingeführt. Ziel ist es, anhand des Auto-MPG-Datensatzes die Kraftstoffeffizienz / Beschleunigung etc. von Autos aus den 1970er und 1980er Jahren vorherzusagen. Dabei werden Sie lernen, Daten zu explorieren, vorzubereiten und mit einem Modell zu trainieren sowie die Ergebnisse zu evaluieren. Außerdem werden Cross-Validation und Workflows thematisiert, um die Konsistenz und Wiederholbarkeit der Modellierung zu verbessern.
+
+Bitte lösen Sie die folgenden Aufgaben Schritt für Schritt und orientieren Sie sich dabei an den bereitgestellten Code-Snippets.
+
+Hinweise und Erklärungen sind enthalten, um euch bei jedem Schritt zu unterstützen.
+
+\newpage
+
+# 1. Datenexploration und Bereinigung
+
+**Frage 1.1:** Importiert den Datensatz sample_car_dataset.csv und zeigt die ersten 10 Zeilen an. Welche Attribute sind im Datensatz enthalten?
+
+```{r data_exploration}	
+library(tidyverse) # Read .csv files
+sample_cars <- read_csv("data/sample_car_dataset.csv") # Load the dataset
+sample_cars %>%  head(10) # Show the first 10 rows of the dataset
+```
+
+**Frage 1.2:** Untersuchen Sie den Datensatz auf fehlende Werte. Welche Spalten haben fehlende Werte?
+
+```{r plot_missing}
+library(DataExplorer) # Data exploration package
+plot_missing(sample_cars) # Visualisieren Sie die fehlenden Datenpunkte
+```
+
+**Frage 1.3:** Führen Sie eine Imputation der Spalte horsepower durch. Welche Methode würden Sie wählen?
+
+**Erklärung 1.3:** Imputation bedeutet, fehlende Werte durch plausible Werte zu ersetzen. Methoden wie "Mean Imputation" (Durchschnitt), "Median Imputation" oder modernere Techniken wie "Predictive Mean Matching" (PMM) können verwendet werden.
+
+**Warum PMM?:** PMM nutzt ähnliche vorhandene Werte im Datensatz, um realistischere Imputationen durchzuführen, statt den Mittelwert zu nehmen.
+
+```{r imputation}	
+library(mice) # Imputation package
+imputed_sample_cars <- mice(sample_cars,
+  m = 2, # Number of imputed datasets
+  maxit = 5, # Number of iterations
+  method = "pmm", # Predictive Mean Matching
+  seed = 123 # Set seed for reproducibility
+) # Imputation using PMM
+
+completed_sample_cars <- complete(imputed_sample_cars) # Complete the dataset
+completed_sample_cars %>%
+  select(car_name, horsepower) %>% # Select relevant columns
+  head(20) # Show the first 10 rows of the completed dataset
+```
+
+\newpage
+
+# 2. Datenaufteilung und Verwendung von Rezepten
+
+**Frage 2.1:** Warum ist es wichtig, die Daten in Trainings- und Testdaten aufzuteilen? Teilt die Daten im Verhältnis 70:30 auf.
+
+**Erklärung 2.1:** Die Aufteilung trennt den Datensatz in zwei Teile: Trainingsdaten, um das Modell zu trainieren, und Testdaten, um die Leistung zu evaluieren. Dadurch vermeiden wir Overfitting, d. h., dass das Modell nur auf Trainingsdaten gut funktioniert, aber auf neuen Daten versagt.
+
+```{r datenaufteilung}	
+library(tidymodels)
+set.seed(123) # Set seed for reproducibility
+sample_cars_split <- initial_split(
+  completed_sample_cars, # Split the dataset
+  prop = 0.7 # Proportion of training data
+) # Split the data into training and testing sets
+train_data <- training(sample_cars_split) # Training data
+test_data <- testing(sample_cars_split) # Testing data
+```
+
+**Frage 2.2:** Was sind Rezepte (`recipes`) und warum werden sie verwendet?
+
+**Erklärung 2.2:** Rezepte in R (aus dem `recipes`-Paket) sind Werkzeuge zur Vorbereitung von Daten. Sie enthalten alle Schritte, um Rohdaten in ein Format zu bringen, das für maschinelles Lernen geeignet ist.
+
+**Typische Schritte eines Rezepts sind:**
+
+- Entfernen irrelevanter Spalten
+- Normalisierung numerischer Variablen
+- Erstellung von Dummy-Variablen für kategoriale Variablen
+- Umgang mit fehlenden Werten
+
+```{r recipe}	
+library(recipes) # Recipe package
+car_recipe_prep <- recipe(mpg ~ ., data = train_data) %>% # Create a recipe
+  # Step 1: Entfernen irrelevanter Spalten
+  step_rm(car_name) %>%
+  # Step 2: Normalisierung numerischer Variablen:
+  step_normalize(all_numeric(), -all_outcomes()) %>%
+  # Step 3: Erstellung von Dummy-Variablen für kategoriale Variablen
+  step_dummy(all_nominal(), -all_outcomes())
+```
+
+**Frage 2.3:** Warum ist es wichtig, numerische Variablen zu normalisieren und kategoriale Variablen in Dummies umzuwandeln? 
+
+**Erklärung 2.3:** Normalisierung numerischer Variablen ist wichtig, da viele maschinelle Lernalgorithmen empfindlich auf unterschiedliche Skalen der Eingabevariablen reagieren. Durch Normalisierung wird sichergestellt, dass alle numerischen Variablen denselben Wertebereich haben, was die Modellleistung verbessern kann.
+
+Das Umwandeln kategorialer Variablen in Dummies ist notwendig, da maschinelle Lernalgorithmen in der Regel nur mit numerischen Daten arbeiten können. Dummy-Variablen kodieren kategoriale Daten in eine numerische Form, die vom Modell verarbeitet werden kann.
+
+**Frage 2.4:** Was ist der Unterschied zwischen `lm(prepped_recipe, ...)` und `train(recipe, ..., method="lm")`?
+
+**Erklärung 2.4:**
+
+- Mit `lm(prepped_recipe, ...)` erstellt ihr ein lineares Regressionsmodell direkt aus einem vorbereiteten Datensatz. Das Rezept wird vorher angewandt.
+- Mit `train(recipe, ..., method="lm")` wird das Rezept direkt in den Modell-Workflow integriert. Dabei erfolgt das Training und die Datenvorbereitung in einem Schritt, was einfacher ist und weniger Fehleranfälligkeit bietet.
+
+1. Methode: `lm(prepped_recipe, ...)`
+   ```{r model_training_lm}
+   library(tidyverse) # For lm function
+   # Prepare the recipe with training data:
+   prepped <- prep(car_recipe_prep, training = train_data)
+   # Apply the recipe to the training data
+   train_processed <- bake(prepped, new_data = NULL)
+   # Apply the recipe to the test data
+   test_processed  <- bake(prepped, new_data = test_data)
+   # Fit the linear model:
+   model_lm <- lm(mpg ~ ., data = train_processed)
+   ```
+
+2. Methode: `train(recipe, ..., method="lm")`
+   ```{r model_training_lm_recipe}
+   library(caret) # For train function
+   # Fit the linear model using the recipe directly:
+   model_lm_recipe <- train(car_recipe_prep, data = train_data, method = "lm")
+   ```
+
+\newpage
+
+# 3. Modelltraining und Evaluation
+
+**Frage 3.1:** Erstellen Sie ein lineares Regressionsmodell und berechnet den RMSE auf den Testdaten.
+
+1. Für erste Methode: `lm(prepped_recipe, ...)`
+   ```{r model_evaluation}
+   # Vorhersagen auf Testdaten:
+   predictions_lm <- predict(model_lm, newdata = test_processed)
+   # Vorhersagen anzeigen:
+   test_data %>%
+     mutate(mpg_predictions = predictions_lm) %>%
+     select(car_name, mpg, mpg_predictions) %>%
+     head(10)
+   # Berechnung des RMSE:
+   rmse <- sqrt(mean((test_data$mpg - predictions_lm)^2))
+   print(rmse) # RMSE ausgeben
+   ```
+
+2. Für zweite Methode: `train(recipe, ..., method="lm")`
+   ```{r model_evaluation_recipe}
+   # Vorhersagen auf Testdaten:
+   predictions_lm_recipe <- predict(model_lm_recipe, newdata = test_data)
+   # Vorhersagen anzeigen:
+   test_data %>%
+     mutate(mpg_predictions = predictions_lm_recipe) %>%
+     select(car_name, mpg, mpg_predictions) %>%
+     head(10)
+   # Berechnung des RMSE:
+   rmse <- sqrt(mean((test_data$mpg - predictions_lm_recipe)^2))
+   print(rmse) # RMSE ausgeben
+   ```
+
+**Zusatsfrage 3.1.1:** Was sagt der RMSE über die Modellgüte aus?
+
+**Erklärung 3.1.1:** Der RMSE (Root Mean Square Error) ist ein Maß für die durchschnittliche Abweichung der Vorhersagen vom tatsächlichen Wert. Ein niedriger RMSE deutet darauf hin, dass das Modell gut funktioniert und die Vorhersagen nahe an den tatsächlichen Werten liegen. Ein hoher RMSE weist auf eine schlechte Modellanpassung hin.
+
+\newpage
+
+# 4. Cross-Validation und Modellvergleich
+
+**Frage 4.1:** Führen Sie eine 5-fache Cross-Validation durch. Warum ist diese Methode besser/ schlechter?
+
+**Erklärung 4.1:** Cross-Validation teilt die Trainingsdaten mehrfach auf (z. B. in 5 Teile) und trainiert das Modell auf 4 Teilen, während der fünfte zur Validierung genutzt wird. Dies wiederholt sich für alle Teile und liefert robustere Ergebnisse.
+
+```{r cross_validation}
+control <- trainControl(method = "cv", number = 5) # 5-fold Cross-Validation
+# Trainieren des Modells mit Cross-Validation:
+model_cv <- train(
+  car_recipe_prep, # Rezept
+  data = train_data, # Trainingsdaten
+  method = "lm", # Modelltyp
+  trControl = control # Cross-Validation-Kontrolle
+)
+```
+
+\newpage
+
+# 5. Modell speichern und wiederverwenden
+
+**Frage 5.1:** Speichern Sie bitte das Modell und laden es neu, um Vorhersagen zu erstellen.
+
+```{r model_speichern}
+if (!dir.exists("trained_models")) {
+  dir.create("trained_models")
+}
+# Modell speichern
+saveRDS(model_cv, "trained_models/linear_model.rds")
+# Modell laden
+loaded_model <- readRDS("trained_models/linear_model.rds")
+predictions_loaded_models <- predict(loaded_model, newdata = test_data)
+test_data %>%
+  mutate(mpg_predictions = predictions_loaded_models) %>%
+  select(car_name, mpg, mpg_predictions) %>%
+  head(10)
+```

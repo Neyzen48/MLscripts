@@ -1,0 +1,465 @@
+---
+title: "ML_Logistic_Regression"
+author: "Dr. Houssam Jedidi"
+date: "`r Sys.Date()`"
+output: html_document
+---
+##################Verbesserung der Klassifikationsleistung mit Regularisierungstechniken in R###############
+
+# Einführung:
+
+In dieser Übung werden wir die Leistung eines Klassifikationsmodells mit verschiedenen Regularisierungstechniken verbessern. Wir beginnen mit der Logistischen Regression (Logreg) und vergleichen dann die Leistung mit Lasso- und Ridge-Regularisierung, um Überanpassung zu reduzieren und die Vorhersagegenauigkeit zu steigern.
+
+Lasso (Least Absolute Shrinkage and Selection Operator): 
+Bei Lasso-Regression werden die Koeffizienten der Variablen so angepasst, dass einige Koeffizienten auf Null gesetzt werden. Dies bedeutet, dass Lasso nicht nur eine Vorhersage macht, sondern auch eine Art von Variablenauswahl durchführt, indem es irrelevante oder weniger wichtige Variablen eliminiert.
+
+Ridge (Tikhonov Regularization): 
+Im Gegensatz dazu schränkt Ridge-Regression die Koeffizienten ein, indem sie zu groß werden. Es versucht, die Koeffizienten zu reduzieren, aber nicht notwendigerweise auf Null zu setzen. Dies führt dazu, dass alle Variablen im Modell bleiben, aber mit reduzierten Effekten.
+
+
+
+# 1 Libraries
+```{r, warning=FALSE, include=FALSE}
+# data uploading
+library(tibble)
+library(readxl)
+library(xlsx)
+
+library(magrittr)
+library(dplyr)
+library(tidyverse)
+
+# General linear models
+library(glmnet)
+library(tidymodels)
+
+# Dataexplorer
+library(DataExplorer)
+library(skimr)
+library(correlationfunnel)
+
+# #imputation 
+#install.packages("missForest")
+library(missForest) 
+
+options(scipen = 999) # Keine Exponetielle Zahlenformat
+```
+
+
+# 2 Reading data
+```{r, warning=FALSE}
+Titanic<-read.csv('old_data/Titanic.csv',header=T,sep = ",",na.strings=c("")) 
+# Titanic<- xlsx::read.xlsx()
+# Titanic<- Titanic %>%
+#     mutate(Age=as.numeric(Age)) %>%
+#     mutate(Age= case_when(
+#         Age>=100 ~ Age/1000,
+#         TRUE~Age
+#     ))
+
+
+hist(as.numeric(Titanic$Age), border = "green")
+
+# Falsche Formattierung der NA--> Charakter muss umwandelt werden
+Titanic<- Titanic %>% 
+    mutate_at(vars(everything()), ~ifelse(.=="NA", NA,.))
+
+```
+
+# 3 EDA & Cleansing
+
+```{r}
+Titanic %>% skim()
+Titanic %>% plot_missing()
+```
+
+```{r}
+# Reformattierung
+# Konvertieren Sie ausgewählte Spalten zu Faktoren
+Titanic <- Titanic %>%
+  mutate(across(c(Survived, Pclass, Sex, Embarked), as.factor)) %>% 
+    mutate(Age=as.numeric(Age)) %>% 
+    select(-c(Cabin, Ticket, Name)) # unötig für die Analyse
+
+```
+
+# 4 Imputation 
+missForest ist ein Paket in R, das für die Imputation von fehlenden Werten in Daten entwickelt wurde. Es verwendet Random Forests, um fehlende Werte zu schätzen. Nach der Anwendung von missForest auf Ihren Datensatz enthält das Ergebnisobjekt verschiedene Informationen, darunter:
+
+ximp: Dies ist der imputierte Datensatz. Hier wurden die fehlenden Werte im Datensatz geschätzt und ersetzt. Sie können auf die imputierten Werte für jede Variable zugreifen, einschließlich "Age".
+OOBerror: Dies ist der Out-of-Bag (OOB)-Fehler des Random Forests auf den imputierten Daten. Dieser Fehler gibt an, wie gut der Random Forest auf den imputierten Werten trainiert wurde.
+importance: Wenn Sie importance = TRUE in der Funktion verwendet haben, erhalten Sie auch Informationen über die Wichtigkeit der Variablen im Random Forest.
+
+```{r}
+# Imputation mit missForest
+imputed_Titanic <- missForest(Titanic)
+
+# Imputierten Datensatz abrufen
+imputed_data <- imputed_Titanic$ximp
+
+# Führen Sie die Imputation in den ursprünglichen Datensatz ein
+Titanic_clean_df <- Titanic %>%
+  mutate(Age = ifelse(is.na(Age), round(imputed_data$Age), as.numeric(Age))) # wir runden Age
+
+```
+
+
+# 5 Datenaufteilung: Training & Testing
+```{r}
+# Teilen Sie den Datensatz in Trainings- und Testdaten auf
+set.seed(123)
+split <- initial_split(Titanic_clean_df, prop = 0.8, strata = "Survived")
+train_data <- training(split)
+test_data <- testing(split)
+
+```
+
+# 6 Rezept Erstellen
+
+recipe() wird verwendet, um ein Rezept zu erstellen, das die Transformationen und Modellspezifikationen definiert. Das Rezept legt fest, wie die abhängige Variable und die unabhängigen Variablen in einem Modell verwendet werden sollen.
+recipe(Survived ~ ., data = train_data): Hier wird ein Rezept für die Modellbildung erstellt. Das Ziel ist es, das Überleben (Survived) in Bezug auf alle anderen verfügbaren Variablen
+
+update_role(PassengerId, new_role = "ID"): Hier wird die Rolle der Variable PassengerId im Modell aktualisiert. Die Variable PassengerId wird auf die Rolle "ID" festgelegt, was bedeutet, dass sie als Identifikator und nicht als Prädiktor im Modell verwendet wird.
+
+```{r}
+# Erstellen Sie ein Rezept für die Vorhersage
+logistic_recipe <- recipe(Survived ~ ., data = train_data) %>%
+    update_role(PassengerId, new_role = "ID") %>%
+    step_string2factor(Sex, Embarked) %>% 
+    step_impute_bag(impute_with = imp_vars(all_predictors()), trees = 15) %>%
+    step_dummy(all_nominal_predictors(), -all_outcomes()) %>% 
+    step_normalize(all_numeric_predictors()) 
+
+
+
+
+summary(logistic_recipe)
+```
+Preproceesing & Baking
+
+prep() wendet die im Rezept definierten Vorverarbeitungsschritte auf die Daten an. Es bereitet die Daten so vor, dass sie direkt in das Modell eingespeist werden können
+
+bake() wird verwendet, um das vorbereitete Modell auf neue oder vorhandene Daten anzuwenden. Es nimmt das vorverarbeitete Modell und wendet es auf eine Datenmenge an, um Vorhersagen zu generieren
+```{r}
+# # Vorbereitung des Rezeptes auf Train unf Test
+prepped_train_data <- prep(logistic_recipe) %>% juice()
+
+# Anwendung des Rezeptes auf den Datensatz
+logistic_baked <- bake(prepped_train_data, new_data = Titanic_clean_df)
+prepped_test_data<-prep(logistic_recipe, new_data=test_data) %>% juice
+
+```
+
+
+# 7 Modell Erstellen
+```{r}
+# Erstellen Sie das logistische Regressionsmodell
+logistic_model <- logistic_reg() %>%
+    set_engine("glm") %>%   # general linearized model
+    set_mode("classification") # Binomiale Klassifikation
+
+```
+
+
+# BSP- Hinzufügen von SVM & RF 
+!! Achten Sie bitte drauf die Workflows für jedes Modell anzupassen 
+```{r}
+# SVM
+svm_model<- svm_rbf(cost = 1, rbf_sigma = 0.1, mode = "classification") %>% 
+    set_engine("kernlab")
+
+# RF
+Rf_model<- rand_forest(trees = 300, mtry = 3, mode = "Classification") %>% 
+    set_engine("ranger")
+```
+
+
+# 8 Workflow Definieren
+```{r}
+# Verketten Sie das Rezept und das Modell zu einem Workflow
+logistic_workflow <- workflow() %>%
+    add_recipe(logistic_recipe) %>%
+    add_model(logistic_model)
+
+Rf_workflow<-workflow() %>%
+    add_recipe(logistic_recipe) %>%
+    add_model(Rf_model)
+
+Svm_workflow<-workflow() %>%
+    add_recipe(logistic_recipe) %>%
+    add_model(svm_model)
+```
+
+# 9 Modell Trainieren
+```{r}
+# Anpassen des Modells an die Daten
+logistic_fit <- logistic_workflow %>%
+    fit(data = train_data)
+
+```
+
+# 10 Prognose Erstellen
+```{r}
+# Überprüfen Sie die Leistung des Modells auf den Testdaten
+predictions <- logistic_fit %>%
+  predict(new_data = test_data) %>%
+    as.tibble() %>% 
+  bind_cols(test_data) %>% 
+    select(c(PassengerId, .pred_class,Survived,everything()))
+
+```
+
+# 11 Updating Recipe
+```{r}
+#update_recipe
+updated_recipe <- recipe(Survived ~ ., data = train_data) %>%
+    update_role(PassengerId, new_role = "ID") %>%
+    step_string2factor(Sex, Embarked) %>% 
+    step_impute_bag(impute_with = imp_vars(all_predictors()), trees = 15) %>%
+    step_impute_mode(Embarked) %>%
+    step_dummy(all_nominal_predictors(), -all_outcomes()) %>% 
+    step_normalize(all_numeric_predictors()) 
+
+#  update Workflow
+updated_workflow <- workflow() %>%
+    add_recipe(updated_recipe) %>%
+    add_model(logistic_model)
+
+# updated_model
+updated_fit <- updated_workflow %>%
+    fit(data = train_data)
+# save model
+#write_rds(updated_fit,"trained_model/updated_fir.rds")
+
+updated_predictions <- updated_fit %>%
+  predict(new_data = test_data) %>%
+    as.tibble() %>% 
+  bind_cols(test_data) %>% 
+    select(c(PassengerId, .pred_class,Survived,everything()))
+```
+
+# 12 Modell Effizienz & Evaluation
+```{r}
+# Genauigkeit berechnen
+accuracy_value <- updated_predictions %>%
+  yardstick::accuracy(truth = Survived, estimate = .pred_class) %>%
+  pull()
+
+# Präzision berechnen
+precision_value <- updated_predictions %>%
+  yardstick::precision(truth = Survived, estimate = .pred_class) %>%
+  pull()
+
+# Rückruf (Recall) berechnen
+recall_value <- updated_predictions %>%
+  yardstick::recall(truth = Survived, estimate = .pred_class) %>%
+  pull()
+
+# Ausdrucken der Metriken
+cat("Accuracy:", accuracy_value, "\n")
+cat("Precision:", precision_value, "\n")
+cat("Recall:", recall_value, "\n")
+
+```
+Accuracy (Genauigkeit): Der Prozentsatz der korrekten Vorhersagen. Hier liegt die Genauigkeit bei etwa 80,4%, was bedeutet, dass etwa 80,4% der Vorhersagen korrekt sind.
+
+
+
+
+```{r}
+conf_matrix <- conf_mat(updated_predictions, truth = Survived, estimate = .pred_class)
+
+library(ggplot2)
+library(ggdist)
+autoplot(conf_matrix, type = "heatmap", scale = "count") +
+  theme_minimal() +
+  ggtitle("Confusion Matrix") +
+  labs(x = "Predicted", y = "Actual")
+```
+True Positives (TP): Die Anzahl der Instanzen, die korrekt als positive Klasse klassifiziert wurden. Zum Beispiel, wenn das Modell vorhersagt, dass eine Person krank ist, und diese Person tatsächlich krank ist.
+True Negatives (TN): Die Anzahl der Instanzen, die korrekt als negative Klasse klassifiziert wurden. Zum Beispiel, wenn das Modell vorhersagt, dass eine Person gesund ist, und diese Person tatsächlich gesund ist.
+False Positives (FP): Die Anzahl der Instanzen, die fälschlicherweise als positive Klasse klassifiziert wurden (Type I Fehler). Zum Beispiel, wenn das Modell vorhersagt, dass eine Person krank ist, aber diese Person tatsächlich gesund ist.
+False Negatives (FN): Die Anzahl der Instanzen, die fälschlicherweise als negative Klasse klassifiziert wurden (Type II Fehler). Zum Beispiel, wenn das Modell vorhersagt, dass eine Person gesund ist, aber diese Person tatsächlich krank ist.
+
+Genauigkeit (Accuracy): Anteil der korrekt klassifizierten Instanzen (TP + TN / Gesamtanzahl).
+Präzision (Precision): Anteil der korrekt positiv klassifizierten Instanzen unter allen positiven Vorhersagen (TP / (TP + FP)).
+
+Sensitivität oder Trefferquote (Recall): Anteil der korrekt positiv klassifizierten Instanzen unter allen tatsächlich positiven Instanzen (TP / (TP + FN)).
+
+F1-Score: Ein gewichteter Durchschnitt von Präzision und Recall, der eine Balance zwischen beiden findet (2 * (Precision * Recall) / (Precision + Recall)).
+
+
+
+```{r}
+# Variable Importance für Logistic Regression
+coefs <- tidy(updated_fit)
+
+# Auswahl der Top N Variablen
+top_n_vars <- coefs %>%
+    filter(!term=="(Intercept)") %>% 
+  arrange(desc(abs(estimate))) %>%
+  slice_head(n = 5)  # Hier 4 steht für die Anzahl der wichtigsten Variablen
+
+# Visualisierung der Variable Importance mit ggplot2
+library(ggplot2)
+ggplot(top_n_vars, aes(x = reorder(term, estimate), y = estimate, fill = factor(sign(estimate)))) +
+  geom_bar(stat = "identity", color = "black", show.legend = FALSE) +
+  labs(title = "Top Variable Importance",
+       x = "Variable",
+       y = "Estimate",
+       fill = "Direction") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+# 12 Verbesserung
+
+## Cross Validation
+```{r}
+# Folder und Zielparameter
+library(tune)
+
+set.seed(6509)
+folds <- vfold_cv(training(split), v = 6, strata = "Survived")     # train_data
+mod_metrics <- metric_set(accuracy, sens, spec)
+
+
+```
+
+```{r}
+# Retraining
+lr <- logistic_reg(mode = "classification") %>%
+  set_engine("glm")
+
+logistic_cv <- fit_resamples(object = lr,
+                             preprocessor = updated_recipe,
+                             resamples = folds,
+                             metrics = mod_metrics)
+
+logistic_cv %>%
+  collect_metrics()
+```
+
+## Regularisierte Regression 
+
+Es gibt verschiedene regularisierte Regressionsmodelle, die mit dem Mischungsparameter definiert sind:
+
+*/ Ridge Regression: Fügt die Summe der quadrierten Regressoren multipliziert mit einem λ-Parameter zur Summe der Residuen hinzu. Auf die regularisierte Regression kann zugegriffen werden, indem mixture = 0 gesetzt wird.
+
+*/ Lasso Regression: Fügt die Summe der absoluten Werte der Regressoren multipliziert mit einem λ-Parameter zur Summe der Residuen hinzu. Lasso-Regression wird erreicht, indem mixture = 1 gesetzt wird.
+
+*/ Elastic Nets: Eine Mischung aus Ridge und Lasso wird durch das Einstellen von Werten für den Mischungsparameter zwischen Null und Eins erreicht.
+
+Wir verwenden logistic_reg mit dem glmnet-Motor und setzen tune() für die Parameter penalty und mixture.
+
+"glmnet" ermöglicht die Anwendung von elastischer Netzregularisierung, einer Kombination aus L1 (Lasso) und L2 (Ridge) Straftermen. Das Paket ist effizient, bietet Pfade für verschiedene Regularisierungsparameter und unterstützt lineare, logistische und Poisson-Regression. glmnet wird oft für Regression in komplexen Datensätzen verwendet, um Überanpassung zu verhindern und Modelle zu stabilisieren.
+
+
+A- Elastic Nets (Mischmodel)
+```{r}
+# Modell für Logistische Regression mit Mischung aus Lasso- und Ridge-Regularisierung definieren
+rlr_mixed <- logistic_reg(penalty = tune(), mixture = tune()) %>%
+  set_engine("glmnet")
+
+# Workflow erstellen und Modell anwenden
+rlr_workflow_mixed <- workflow() %>%
+  add_recipe(updated_recipe) %>%
+  add_model(rlr_mixed)
+
+# Suchbereich für den Hyperparameter 'alpha' festlegen
+alpha_grid <- expand.grid(penalty = c(0, 1), mixture = seq(0, 1, 0.001))
+
+# Modell trainieren
+rlr_fit_mixed <- rlr_workflow_mixed %>%
+  tune_grid(resamples = folds, grid = alpha_grid) %>%
+  collect_metrics()
+
+#write_rds(rlr_fit_mixed,"trained_model/rlr_fit_mixed.rds")
+
+# Ausgewählte Metrik und optimale Hyperparameter anzeigen
+best_metrics <- rlr_fit_mixed %>%
+  filter(.metric == "accuracy") %>%
+  arrange(desc(mean)) %>%
+  slice(1)
+
+best_metrics
+
+```
+Erklärung der Variablenauswahl:
+
+Der Parameter mixture variiert von 0 bis 1 mit einer Schrittweite von 0.01. Er wird oft als Mischungsverhältnis zwischen L1- und L2-Regularisierung verwendet. Ein Wert von 0 bedeutet ausschließlich 
+
+L2-Regularisierung (Ridge-Regularisierung), während ein Wert von 1 ausschließlich L1-Regularisierung (Lasso-Regularisierung) bedeutet. Werte zwischen 0 und 1 führen zu einer Mischung aus beiden Regularisierungen.
+
+--> Wir versuchen hier die Balance zw. Lasso (unnötige koeffizienten aud 0 setzten) und Ridge (max reduzierung von Koeffizienten - Multikollinearität) zu finden um die Balance zw. Modellkomplexität und Modellgenauigkeit zu optimieren
+
+B- Ridge Modell 
+```{r}
+library(tidymodels)
+
+# Modell für Logistische Regression mit Lasso-Regularisierung und CV definieren
+Ridge_model <- logistic_reg(penalty = 0, mixture = 1) %>%
+  set_engine("glmnet")
+
+# Workflow erstellen und Modell anwenden
+Ridge_workflow <- workflow() %>%
+  add_recipe(updated_recipe) %>%
+  add_model(Ridge_model)
+
+# Modell trainieren und Hyperparameter optimieren mit Kreuzvalidierung
+Ridge_fit <- Ridge_workflow %>%
+  tune_grid(resamples = folds) %>%
+  collect_metrics()
+
+# Ausgewählte Metrik und optimale Hyperparameter anzeigen
+best_metrics <- Ridge_fit %>%
+  filter(.metric == "accuracy") %>%
+  arrange(desc(mean)) %>%
+  slice(1)
+
+best_metrics
+
+
+#roc_auc:bewertet die Fähigkeit eines Modells, zwischen positiven und negativen Klassen zu unterscheiden
+```
+
+
+C- Lasso Modell
+```{r}
+Lasso_rlr <- logistic_reg(penalty = 1, mixture = 0) %>%
+  set_engine("glmnet")
+
+best_model <- workflow() %>%
+  add_recipe(updated_recipe) %>%
+  add_model(Lasso_rlr) %>%
+  fit(train_data)
+```
+
+```{r}
+best_model %>%
+  predict(test_data) %>%
+  bind_cols(test_data) %>%
+  mod_metrics(truth = Survived, estimate = .pred_class)
+```
+
+
+# Zusammenfassung:
+
+/* Logistische Regression (ohne Regularisierung):
+
+In der normalen Logistischen Regression wird das Modell durch Maximierung der Likelihood-Funktion geschätzt, wobei die Koeffizienten der Features geschätzt werden, um die Wahrscheinlichkeit für das Auftreten einer bestimmten Klasse zu modellieren.
+Die Schätzung der Koeffizienten erfolgt ohne zusätzliche Beschränkungen, was dazu führen kann, dass das Modell anfällig für Überanpassung wird, insbesondere wenn die Anzahl der Features groß ist oder Multikollinearität vorliegt.
+
+/* Lasso (L1-Regularisierung):
+
+Lasso fügt der Kostenfunktion eine L1-Regularisierung hinzu, die dazu neigt, die Koeffizienten der weniger wichtigen Features auf genau null zu setzen. Dies führt zu einer "spärlichen" Lösung, bei der nur eine Untermenge der Features im Modell enthalten ist.
+Die Tendenz von Lasso, Koeffizienten auf null zu setzen, macht es besonders nützlich für die Feature-Auswahl und die Erzeugung von einfachen und interpretierbaren Modellen.
+
+*/ Ridge (L2-Regularisierung):
+
+Ridge fügt der Kostenfunktion eine L2-Regularisierung hinzu, die dazu neigt, die Koeffizienten aller Features zu reduzieren, aber sie nicht auf genau null zu setzen.
+Die Verwendung von Ridge-Regularisierung hilft, die Auswirkungen von Multikollinearität zu reduzieren, indem sie die Werte der Koeffizienten verkleinert und sie näher an null zentriert. Dies führt zu stabileren und weniger variablen Modellen.
+
+
+Zusammenfassend bieten Lasso und Ridge-Regularisierung Mechanismen zur Kontrolle der Modellkomplexität und zur Verbesserung der Vorhersageleistung, insbesondere in Situationen mit vielen Features oder Multikollinearität. Lasso betont die Feature-Auswahl und führt zu spärlichen Modellen, während Ridge die Koeffizienten reduziert, aber nicht auf null setzt, um stabile und konsistente Lösungen zu erzielen.
